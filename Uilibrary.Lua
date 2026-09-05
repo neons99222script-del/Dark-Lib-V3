@@ -153,6 +153,54 @@ local function MakeDraggable(topbar, frame)
 	end)
 end
 
+-- Like MakeDraggable, but for a small standalone button that should also
+-- respond to a plain click/tap: dragging it moves it around the screen,
+-- while a tap that doesn't move past a small threshold fires onClick.
+-- Used by the floating "reopen" bubble.
+local function MakeDraggableToggle(button, onClick)
+	local dragging = false
+	local dragInput, dragStart, startPos
+	local moved = false
+	local MOVE_THRESHOLD = 6
+
+	button.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			moved = false
+			dragStart = input.Position
+			startPos = button.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+
+	button.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			dragInput = input
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if input == dragInput and dragging then
+			local delta = input.Position - dragStart
+			if delta.Magnitude > MOVE_THRESHOLD then moved = true end
+			button.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		end
+	end)
+
+	UserInputService.InputEnded:Connect(function(input)
+		if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and dragging then
+			dragging = false
+			if not moved then
+				onClick()
+			end
+		end
+	end)
+end
+
 local function GetParentGui()
 	local ok, gui = pcall(function()
 		return CoreGuiService
@@ -174,12 +222,22 @@ end
 local Library = {}
 Library.__index = Library
 Library.Flags = {}
-Library.CurrentTheme = Themes["Dark Default"]
+Library.CurrentTheme = {}
+for k, v in pairs(Themes["Dark Default"]) do Library.CurrentTheme[k] = v end
 Library.ThemeObjects = {} -- objects registered for live theme updates
 Library.Options = {} -- element registry for search + config
 
 function Library:RegisterThemeObject(obj, prop, key)
 	table.insert(self.ThemeObjects, {Object = obj, Prop = prop, Key = key})
+end
+
+-- For elements whose color depends on runtime state (a Toggle's on/off color,
+-- a Dropdown's selected-option highlight, the active Tab), register a callback
+-- here. ApplyTheme calls every refresher after the theme table is updated so
+-- these elements re-render with the new colors immediately.
+Library.ThemeRefreshers = {}
+function Library:OnThemeRefresh(fn)
+	table.insert(self.ThemeRefreshers, fn)
 end
 
 -- Deletes any saved Key System key so ShowKeySystem stops auto-bypassing.
@@ -193,14 +251,24 @@ function Library:ResetKey()
 	return ok
 end
 
-function Library:ApplyTheme(theme)
-	self.CurrentTheme = theme
+function Library:ApplyTheme(newTheme)
+	-- Mutate the existing CurrentTheme table in place (instead of replacing the
+	-- reference) so every element that captured "local theme = Library.CurrentTheme"
+	-- at creation time automatically reads the new colors on its next hover/click/
+	-- state-change, without needing to be individually re-registered.
+	local theme = self.CurrentTheme
+	for key, value in pairs(newTheme) do
+		theme[key] = value
+	end
 	for _, entry in ipairs(self.ThemeObjects) do
 		if entry.Object and entry.Object.Parent then
 			pcall(function()
 				Tween(entry.Object, {[entry.Prop] = theme[entry.Key]}, 0.25)
 			end)
 		end
+	end
+	for _, refresh in ipairs(self.ThemeRefreshers) do
+		pcall(refresh)
 	end
 end
 
@@ -566,9 +634,8 @@ function Library:CreateWindow(config)
 		}),
 	})
 	Shadow.Parent = ScreenGui
-	Main:GetPropertyChangedSignal("Position"):Connect(function()
-		Shadow.Position = Main.Position
-	end)
+	-- NOTE: intentionally no Position-sync connection here — the shadow stays
+	-- put and does not follow Main around while the window is being dragged.
 	Library:RegisterThemeObject(Main, "BackgroundColor3", "Main")
 
 	-- opening animation
@@ -614,11 +681,13 @@ function Library:CreateWindow(config)
 			Parent = TopBar, BackgroundColor3 = theme.Main, Size = UDim2.new(0,28,0,28),
 			Position = UDim2.new(1, posOffset, 0.5, -14), Text = "", AutoButtonColor = false,
 		}, {Create("UICorner", {CornerRadius = UDim.new(0,8)})})
-		Create("ImageLabel", {
+		Library:RegisterThemeObject(Btn, "BackgroundColor3", "Main")
+		local Icon = Create("ImageLabel", {
 			Parent = Btn, BackgroundTransparency = 1, Size = UDim2.new(0,14,0,14),
 			AnchorPoint = Vector2.new(0.5,0.5), Position = UDim2.new(0.5,0,0.5,0),
 			Image = icon, ImageColor3 = theme.Text,
 		})
+		Library:RegisterThemeObject(Icon, "ImageColor3", "Text")
 		Btn.MouseEnter:Connect(function() Tween(Btn, {BackgroundColor3 = theme.Accent}, 0.15) end)
 		Btn.MouseLeave:Connect(function() Tween(Btn, {BackgroundColor3 = theme.Main}, 0.15) end)
 		return Btn
@@ -639,18 +708,60 @@ function Library:CreateWindow(config)
 		end
 	end)
 
+	-- floating draggable bubble shown while the UI is closed; clicking it
+	-- (without dragging) reopens the window with a smooth effect
+	local FloatingToggle = Create("ImageButton", {
+		Name = "DarkUI_FloatingToggle",
+		Parent = ScreenGui,
+		BackgroundColor3 = theme.Accent,
+		Size = UDim2.new(0,0,0,0),
+		Position = UDim2.new(0, 24, 0.5, -24),
+		AutoButtonColor = false,
+		Image = "",
+		Visible = false,
+		ZIndex = 500,
+	}, {
+		Create("UICorner", {CornerRadius = UDim.new(1,0)}),
+		Create("UIStroke", {Color = theme.Stroke, Transparency = 0.4, Thickness = 1}),
+	})
+	Library:RegisterThemeObject(FloatingToggle, "BackgroundColor3", "Accent")
+	local FloatingIcon = Create("ImageLabel", {
+		Parent = FloatingToggle, BackgroundTransparency = 1, Size = UDim2.new(0,22,0,22),
+		AnchorPoint = Vector2.new(0.5,0.5), Position = UDim2.new(0.5,0,0.5,0),
+		Image = "rbxassetid://10734950309", ImageColor3 = Color3.new(1,1,1), ZIndex = 501,
+	})
+	FloatingToggle.MouseEnter:Connect(function() Tween(FloatingIcon, {Size = UDim2.new(0,25,0,25)}, 0.15) end)
+	FloatingToggle.MouseLeave:Connect(function() Tween(FloatingIcon, {Size = UDim2.new(0,22,0,22)}, 0.15) end)
+
 	local uiVisible = true
+
+	local function closeUI()
+		uiVisible = false
+		Tween(Main, {Size = UDim2.new(0,0,0,0)}, 0.28, Enum.EasingStyle.Quint)
+		Tween(Shadow, {ImageTransparency = 1}, 0.28)
+		task.delay(0.2, function()
+			if uiVisible then return end
+			FloatingToggle.Visible = true
+			Tween(FloatingToggle, {Size = UDim2.new(0,48,0,48)}, 0.3, Enum.EasingStyle.Back)
+		end)
+	end
+
+	local function openUI()
+		uiVisible = true
+		Tween(FloatingToggle, {Size = UDim2.new(0,0,0,0)}, 0.2, Enum.EasingStyle.Quint)
+		task.delay(0.2, function()
+			if not uiVisible then return end
+			FloatingToggle.Visible = false
+		end)
+		Tween(Main, {Size = minimized and UDim2.new(mainSize.X.Scale, mainSize.X.Offset, 0, 42) or mainSize}, 0.32, Enum.EasingStyle.Back)
+		Tween(Shadow, {ImageTransparency = 0.55}, 0.32)
+	end
+
 	CloseBtn.MouseButton1Click:Connect(function()
-		uiVisible = not uiVisible
-		if uiVisible then
-			ScreenGui.Enabled = true
-			Main.Size = UDim2.new(0,0,0,0)
-			Tween(Main, {Size = minimized and UDim2.new(mainSize.X.Scale, mainSize.X.Offset, 0, 42) or mainSize}, 0.32, Enum.EasingStyle.Back)
-		else
-			Tween(Main, {Size = UDim2.new(0,0,0,0)}, 0.25)
-			task.delay(0.26, function() if not uiVisible then ScreenGui.Enabled = false end end)
-		end
+		if uiVisible then closeUI() else openUI() end
 	end)
+
+	MakeDraggableToggle(FloatingToggle, openUI)
 
 	-- search bar
 	local SearchHolder = Create("Frame", {
@@ -662,10 +773,11 @@ function Library:CreateWindow(config)
 	})
 	Library:RegisterThemeObject(SearchHolder, "BackgroundColor3", "Second")
 
-	Create("ImageLabel", {
+	local SearchIcon = Create("ImageLabel", {
 		Parent = SearchHolder, BackgroundTransparency = 1, Size = UDim2.new(0,14,0,14),
 		Position = UDim2.new(0,10,0.5,-7), Image = "rbxassetid://10709790948", ImageColor3 = theme.SubText,
 	})
+	Library:RegisterThemeObject(SearchIcon, "ImageColor3", "SubText")
 
 	local SearchBox = Create("TextBox", {
 		Parent = SearchHolder, BackgroundTransparency = 1, Size = UDim2.new(1,-36,1,0), Position = UDim2.new(0,30,0,0),
@@ -673,7 +785,8 @@ function Library:CreateWindow(config)
 		TextColor3 = theme.Text, PlaceholderColor3 = theme.SubText, TextSize = 13,
 		TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false,
 	})
-
+	Library:RegisterThemeObject(SearchBox, "TextColor3", "Text")
+	Library:RegisterThemeObject(SearchBox, "PlaceholderColor3", "SubText")
 
 	-- tab bar (left, auto scroll)
 	local TabBar = Create("ScrollingFrame", {
@@ -730,6 +843,7 @@ function Library:CreateWindow(config)
 	end)
 
 	function Window:SelectTab(tab)
+		self.ActiveTab = tab
 		for _, t in pairs(self.Tabs) do
 			local isActive = (t == tab)
 			t.Container.Visible = isActive
@@ -740,6 +854,9 @@ function Library:CreateWindow(config)
 			end
 		end
 	end
+	Library:OnThemeRefresh(function()
+		if Window.ActiveTab then Window:SelectTab(Window.ActiveTab) end
+	end)
 
 	function Window:CreateTab(name, order)
 		local theme = Library.CurrentTheme
@@ -747,6 +864,7 @@ function Library:CreateWindow(config)
 			Parent = TabBar, BackgroundColor3 = theme.Second, Size = UDim2.new(1,0,0,34),
 			Text = "", AutoButtonColor = false, LayoutOrder = order or #self.Tabs + 1,
 		}, {Create("UICorner", {CornerRadius = UDim.new(0,8)})})
+		Library:RegisterThemeObject(TabButton, "BackgroundColor3", "Second")
 
 		local Indicator = Create("Frame", {
 			Parent = TabButton, BackgroundColor3 = Color3.new(1,1,1), BackgroundTransparency = 1,
@@ -809,15 +927,19 @@ function Library:CreateWindow(config)
 				Create("UIPadding", {PaddingTop = UDim.new(0,12), PaddingBottom = UDim.new(0,12), PaddingLeft = UDim.new(0,14), PaddingRight = UDim.new(0,14)}),
 				Create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0,8)}),
 			})
+			Library:RegisterThemeObject(Frame, "BackgroundColor3", "Second")
+			Library:RegisterThemeObject(Frame.UIStroke, "Color", "Stroke")
 			local Header = Create("Frame", {Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(1,0,0,18)})
-			Create("Frame", {
+			local AccentBar = Create("Frame", {
 				Parent = Header, BackgroundColor3 = theme.Accent, Size = UDim2.new(0,3,0,14), Position = UDim2.new(0,0,0.5,-7),
 			}, {Create("UICorner", {CornerRadius = UDim.new(1,0)})})
-			Create("TextLabel", {
+			Library:RegisterThemeObject(AccentBar, "BackgroundColor3", "Accent")
+			local HeaderLabel = Create("TextLabel", {
 				Parent = Header, BackgroundTransparency = 1, Size = UDim2.new(1,-12,1,0), Position = UDim2.new(0,10,0,0),
 				Font = Enum.Font.GothamBold, Text = name, TextColor3 = theme.Text, TextSize = 14,
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
+			Library:RegisterThemeObject(HeaderLabel, "TextColor3", "Text")
 			table.insert(self.Elements, {Name = name, Frame = Frame})
 
 			local Section = {}
@@ -838,6 +960,7 @@ function Library:CreateWindow(config)
 				Font = Enum.Font.Gotham, Text = text, TextColor3 = theme.SubText, TextSize = 13,
 				TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true,
 			})
+			Library:RegisterThemeObject(Label, "TextColor3", "SubText")
 			table.insert(self.Elements, {Name = text, Frame = Frame})
 			return {Set = function(_, t) Label.Text = t end}
 		end
@@ -845,11 +968,12 @@ function Library:CreateWindow(config)
 		function Tab:CreateSeparateText(text)
 			local theme = Library.CurrentTheme
 			local Frame = Create("Frame", {Parent = self.Container, BackgroundTransparency = 1, Size = UDim2.new(1,0,0,26)})
-			Create("TextLabel", {
+			local Label = Create("TextLabel", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(1,-20,0,16),
 				Font = Enum.Font.GothamBold, Text = string.upper(text), TextColor3 = theme.SubText, TextSize = 11,
 				TextXAlignment = Enum.TextXAlignment.Left, Position = UDim2.new(0,0,0,2),
 			})
+			Library:RegisterThemeObject(Label, "TextColor3", "SubText")
 			local Line = Create("Frame", {
 				Parent = Frame, BackgroundColor3 = theme.Stroke, Size = UDim2.new(1,0,0,1), Position = UDim2.new(0,0,0,22),
 			}, {Create("UIGradient", {
@@ -858,6 +982,7 @@ function Library:CreateWindow(config)
 					NumberSequenceKeypoint.new(1, 0.9),
 				}),
 			})})
+			Library:RegisterThemeObject(Line, "BackgroundColor3", "Stroke")
 			table.insert(self.Elements, {Name = text, Frame = Frame})
 			return Frame
 		end
@@ -875,16 +1000,18 @@ function Library:CreateWindow(config)
 				Create("UICorner", {CornerRadius = UDim.new(0,10)}),
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 			})
-			Create("TextLabel", {
+			Library:RegisterThemeObject(Frame.UIStroke, "Color", "Stroke")
+			local Label = Create("TextLabel", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(1,-40,1,0), Position = UDim2.new(0,14,0,0),
 				Font = Enum.Font.GothamMedium, Text = opts.Name or "Button", TextColor3 = theme.Text, TextSize = 14,
 				TextXAlignment = Enum.TextXAlignment.Left,
-			})
+			})			Library:RegisterThemeObject(Label, "TextColor3", "Text")
 			local Chevron = Create("ImageLabel", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(0,10,0,10),
 				Position = UDim2.new(1,-22,0.5,-5), Image = "rbxassetid://10709790787",
 				ImageColor3 = theme.SubText, Rotation = 0,
 			})
+			Library:RegisterThemeObject(Chevron, "ImageColor3", "SubText")
 			Frame.MouseEnter:Connect(function() Tween(Frame, {BackgroundColor3 = theme.Main}, 0.15) end)
 			Frame.MouseLeave:Connect(function() Tween(Frame, {BackgroundColor3 = theme.Second}, 0.15) end)
 			Frame.MouseButton1Click:Connect(function()
@@ -911,12 +1038,15 @@ function Library:CreateWindow(config)
 				Create("UICorner", {CornerRadius = UDim.new(0,10)}),
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 			})
+			Library:RegisterThemeObject(Frame, "BackgroundColor3", "Second")
+			Library:RegisterThemeObject(Frame.UIStroke, "Color", "Stroke")
 
-			Create("TextLabel", {
+			local NameLabel = Create("TextLabel", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(1,-70,1,0), Position = UDim2.new(0,14,0,0),
 				Font = Enum.Font.GothamMedium, Text = opts.Name or "Toggle", TextColor3 = theme.Text, TextSize = 14,
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
+			Library:RegisterThemeObject(NameLabel, "TextColor3", "Text")
 
 			local SwitchBG = Create("Frame", {
 				Parent = Frame, BackgroundColor3 = state and theme.Accent or theme.Main,
@@ -925,6 +1055,7 @@ function Library:CreateWindow(config)
 				Create("UICorner", {CornerRadius = UDim.new(1,0)}),
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 			})
+			Library:RegisterThemeObject(SwitchBG.UIStroke, "Color", "Stroke")
 
 			local Knob = Create("Frame", {
 				Parent = SwitchBG, BackgroundColor3 = Color3.new(1,1,1), Size = UDim2.new(0,16,0,16),
@@ -949,6 +1080,7 @@ function Library:CreateWindow(config)
 				Tween(SwitchBG, {BackgroundColor3 = Toggle.Value and theme.Accent or theme.Main}, 0.2)
 				Tween(Knob, {Position = Toggle.Value and UDim2.new(1,-19,0.5,-8) or UDim2.new(0,3,0.5,-8)}, 0.2, Enum.EasingStyle.Back)
 			end
+			Library:OnThemeRefresh(updateVisual)
 
 			function Toggle:Set(v)
 				Toggle.Value = v
@@ -983,15 +1115,19 @@ function Library:CreateWindow(config)
 				Create("UICorner", {CornerRadius = UDim.new(0,10)}),
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 			})
+			Library:RegisterThemeObject(Frame, "BackgroundColor3", "Second")
+			Library:RegisterThemeObject(Frame.UIStroke, "Color", "Stroke")
 
-			Create("TextLabel", {
+			local NameLabel = Create("TextLabel", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(1,-90,0,20), Position = UDim2.new(0,14,0,8),
 				Font = Enum.Font.GothamMedium, Text = opts.Name or "Slider", TextColor3 = theme.Text, TextSize = 14,
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
+			Library:RegisterThemeObject(NameLabel, "TextColor3", "Text")
 			local ValuePill = Create("Frame", {
 				Parent = Frame, BackgroundColor3 = theme.Main, Size = UDim2.new(0,54,0,20), Position = UDim2.new(1,-68,0,8),
 			}, {Create("UICorner", {CornerRadius = UDim.new(0,6)})})
+			Library:RegisterThemeObject(ValuePill, "BackgroundColor3", "Main")
 			local ValueLabel = Create("TextLabel", {
 				Parent = ValuePill, BackgroundTransparency = 1, Size = UDim2.new(1,0,1,0),
 				Font = Enum.Font.GothamBold, Text = tostring(value), TextColor3 = theme.Accent, TextSize = 12,
@@ -1002,6 +1138,7 @@ function Library:CreateWindow(config)
 			local Track = Create("Frame", {
 				Parent = Frame, BackgroundColor3 = theme.Main, Size = UDim2.new(1,-28,0,6), Position = UDim2.new(0,14,0,34),
 			}, {Create("UICorner", {CornerRadius = UDim.new(1,0)})})
+			Library:RegisterThemeObject(Track, "BackgroundColor3", "Main")
 
 			local Fill = Create("Frame", {
 				Parent = Track, BackgroundColor3 = theme.Accent, Size = UDim2.new((value-Min)/(Max-Min),0,1,0),
@@ -1023,6 +1160,8 @@ function Library:CreateWindow(config)
 				Create("UICorner", {CornerRadius = UDim.new(1,0)}),
 				Create("UIStroke", {Color = theme.Accent, Thickness = 2}),
 			})
+			Library:RegisterThemeObject(Fill, "BackgroundColor3", "Accent")
+			Library:RegisterThemeObject(Handle.UIStroke, "Color", "Accent")
 
 			local Slider = {Value = value}
 
@@ -1083,26 +1222,36 @@ function Library:CreateWindow(config)
 			opts = opts or {}
 			local theme = Library.CurrentTheme
 			local Frame = Create("Frame", {
-				Parent = self.Container, BackgroundColor3 = theme.Second, Size = UDim2.new(1,0,0,36),
-			}, {Create("UICorner", {CornerRadius = UDim.new(0,8)})})
+				Parent = self.Container, BackgroundColor3 = theme.Second, Size = UDim2.new(1,0,0,38),
+			}, {
+				Create("UICorner", {CornerRadius = UDim.new(0,10)}),
+				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
+			})
+			Library:RegisterThemeObject(Frame, "BackgroundColor3", "Second")
+			Library:RegisterThemeObject(Frame.UIStroke, "Color", "Stroke")
 
-			Create("TextLabel", {
+			local NameLabel = Create("TextLabel", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(0.4,0,1,0), Position = UDim2.new(0,14,0,0),
 				Font = Enum.Font.GothamMedium, Text = opts.Name or "Textbox", TextColor3 = theme.Text, TextSize = 14,
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
+			Library:RegisterThemeObject(NameLabel, "TextColor3", "Text")
 			local BoxHolder = Create("Frame", {
 				Parent = Frame, BackgroundColor3 = theme.Main, Size = UDim2.new(0.55,-14,0,28), Position = UDim2.new(0.45,0,0.5,-14),
 			}, {
 				Create("UICorner", {CornerRadius = UDim.new(0,8)}),
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 			})
+			Library:RegisterThemeObject(BoxHolder, "BackgroundColor3", "Main")
+			Library:RegisterThemeObject(BoxHolder.UIStroke, "Color", "Stroke")
 			local Box = Create("TextBox", {
 				Parent = BoxHolder, BackgroundTransparency = 1, Size = UDim2.new(1,-16,1,0), Position = UDim2.new(0,8,0,0),
 				Font = Enum.Font.Gotham, PlaceholderText = opts.PlaceholderText or "...", Text = opts.Default or "",
 				TextColor3 = theme.Text, PlaceholderColor3 = theme.SubText, TextSize = 13, ClearTextOnFocus = false,
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
+			Library:RegisterThemeObject(Box, "TextColor3", "Text")
+			Library:RegisterThemeObject(Box, "PlaceholderColor3", "SubText")
 
 			local Textbox = {Value = opts.Default or ""}
 			Box.Focused:Connect(function() Tween(BoxHolder, {BackgroundColor3 = theme.Main}, 0.15) end)
@@ -1134,12 +1283,15 @@ function Library:CreateWindow(config)
 				Create("UICorner", {CornerRadius = UDim.new(0,10)}),
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 			})
+			Library:RegisterThemeObject(Frame, "BackgroundColor3", "Second")
+			Library:RegisterThemeObject(Frame.UIStroke, "Color", "Stroke")
 
-			Create("TextLabel", {
+			local NameLabel = Create("TextLabel", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(1,-100,1,0), Position = UDim2.new(0,14,0,0),
 				Font = Enum.Font.GothamMedium, Text = opts.Name or "Bind", TextColor3 = theme.Text, TextSize = 14,
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
+			Library:RegisterThemeObject(NameLabel, "TextColor3", "Text")
 
 			local KeyButton = Create("TextButton", {
 				Parent = Frame, BackgroundColor3 = theme.Main, Size = UDim2.new(0,80,0,26), Position = UDim2.new(1,-94,0.5,-13),
@@ -1149,6 +1301,8 @@ function Library:CreateWindow(config)
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 			})
 			Library:RegisterThemeObject(KeyButton, "TextColor3", "Accent")
+			Library:RegisterThemeObject(KeyButton, "BackgroundColor3", "Main")
+			Library:RegisterThemeObject(KeyButton.UIStroke, "Color", "Stroke")
 
 			local Bind = {Value = currentKey}
 
@@ -1193,12 +1347,15 @@ function Library:CreateWindow(config)
 				Create("UICorner", {CornerRadius = UDim.new(0,10)}),
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 			})
+			Library:RegisterThemeObject(Frame, "BackgroundColor3", "Second")
+			Library:RegisterThemeObject(Frame.UIStroke, "Color", "Stroke")
 
-			Create("TextLabel", {
+			local NameLabel = Create("TextLabel", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(0.7,0,0,16), Position = UDim2.new(0,14,0,8),
 				Font = Enum.Font.GothamMedium, Text = opts.Name or "Progress", TextColor3 = theme.Text, TextSize = 13,
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
+			Library:RegisterThemeObject(NameLabel, "TextColor3", "Text")
 			local PercentLabel = Create("TextLabel", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(0.3,-14,0,16), Position = UDim2.new(0.7,0,0,8),
 				Font = Enum.Font.GothamBold, Text = string.format("%d%%", math.floor(((value-Min)/(Max-Min))*100)),
@@ -1209,6 +1366,7 @@ function Library:CreateWindow(config)
 			local Track = Create("Frame", {
 				Parent = Frame, BackgroundColor3 = theme.Main, Size = UDim2.new(1,-28,0,10), Position = UDim2.new(0,14,0,28),
 			}, {Create("UICorner", {CornerRadius = UDim.new(1,0)})})
+			Library:RegisterThemeObject(Track, "BackgroundColor3", "Main")
 
 			local Fill = Create("Frame", {
 				Parent = Track, BackgroundColor3 = theme.Accent, Size = UDim2.new((value-Min)/(Max-Min),0,1,0),
@@ -1221,6 +1379,7 @@ function Library:CreateWindow(config)
 					}),
 				}),
 			})
+			Library:RegisterThemeObject(Fill, "BackgroundColor3", "Accent")
 
 			local Bar = {Value = value}
 			function Bar:Set(v)
@@ -1250,12 +1409,15 @@ function Library:CreateWindow(config)
 				Create("UICorner", {CornerRadius = UDim.new(0,10)}),
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 			})
+			Library:RegisterThemeObject(Frame, "BackgroundColor3", "Second")
+			Library:RegisterThemeObject(Frame.UIStroke, "Color", "Stroke")
 
-			Create("TextLabel", {
+			local NameLabel = Create("TextLabel", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(0.5,0,0,38), Position = UDim2.new(0,14,0,0),
 				Font = Enum.Font.GothamMedium, Text = opts.Name or "Dropdown", TextColor3 = theme.Text, TextSize = 14,
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
+			Library:RegisterThemeObject(NameLabel, "TextColor3", "Text")
 
 			local SelectedLabel = Create("TextButton", {
 				Parent = Frame, BackgroundColor3 = theme.Main, Size = UDim2.new(0.45,-14,0,28), Position = UDim2.new(0.55,0,0,5),
@@ -1266,11 +1428,14 @@ function Library:CreateWindow(config)
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 				Create("UIPadding", {PaddingLeft = UDim.new(0,10), PaddingRight = UDim.new(0,22)}),
 			})
+			Library:RegisterThemeObject(SelectedLabel, "BackgroundColor3", "Main")
+			Library:RegisterThemeObject(SelectedLabel.UIStroke, "Color", "Stroke")
 
 			local Chevron = Create("ImageLabel", {
 				Parent = SelectedLabel, BackgroundTransparency = 1, Size = UDim2.new(0,10,0,10),
 				Position = UDim2.new(1,-18,0.5,-5), Image = "rbxassetid://10709790787", ImageColor3 = theme.SubText,
 			})
+			Library:RegisterThemeObject(Chevron, "ImageColor3", "SubText")
 
 			local ListHolder = Create("Frame", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(1,-24,0,0), Position = UDim2.new(0,12,0,44),
@@ -1308,6 +1473,7 @@ function Library:CreateWindow(config)
 				end
 			end
 			rebuildList()
+			Library:OnThemeRefresh(rebuildList)
 
 			function Dropdown:Refresh(newOptions)
 				Dropdown.Options = newOptions
@@ -1353,12 +1519,15 @@ function Library:CreateWindow(config)
 				Create("UICorner", {CornerRadius = UDim.new(0,10)}),
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 			})
+			Library:RegisterThemeObject(Frame, "BackgroundColor3", "Second")
+			Library:RegisterThemeObject(Frame.UIStroke, "Color", "Stroke")
 
-			Create("TextLabel", {
+			local NameLabel = Create("TextLabel", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(0.5,0,0,38), Position = UDim2.new(0,14,0,0),
 				Font = Enum.Font.GothamMedium, Text = opts.Name or "MultiDropdown", TextColor3 = theme.Text, TextSize = 14,
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
+			Library:RegisterThemeObject(NameLabel, "TextColor3", "Text")
 
 			local SelectedLabel = Create("TextButton", {
 				Parent = Frame, BackgroundColor3 = theme.Main, Size = UDim2.new(0.45,-14,0,28), Position = UDim2.new(0.55,0,0,5),
@@ -1369,10 +1538,13 @@ function Library:CreateWindow(config)
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 				Create("UIPadding", {PaddingLeft = UDim.new(0,10), PaddingRight = UDim.new(0,22)}),
 			})
+			Library:RegisterThemeObject(SelectedLabel, "BackgroundColor3", "Main")
+			Library:RegisterThemeObject(SelectedLabel.UIStroke, "Color", "Stroke")
 			local MultiChevron = Create("ImageLabel", {
 				Parent = SelectedLabel, BackgroundTransparency = 1, Size = UDim2.new(0,10,0,10),
 				Position = UDim2.new(1,-18,0.5,-5), Image = "rbxassetid://10709790787", ImageColor3 = theme.SubText,
 			})
+			Library:RegisterThemeObject(MultiChevron, "ImageColor3", "SubText")
 
 			local ListHolder = Create("Frame", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(1,-24,0,0), Position = UDim2.new(0,12,0,44),
@@ -1411,6 +1583,7 @@ function Library:CreateWindow(config)
 			end
 			rebuildList()
 			updateLabel()
+			Library:OnThemeRefresh(function() rebuildList(); updateLabel() end)
 
 			function MultiDropdown:Set(set)
 				MultiDropdown.Value = set
@@ -1448,23 +1621,27 @@ function Library:CreateWindow(config)
 				Create("UICorner", {CornerRadius = UDim.new(0,10)}),
 				Create("UIStroke", {Color = theme.Stroke, Transparency = 0.6}),
 			})
+			Library:RegisterThemeObject(Frame.UIStroke, "Color", "Stroke")
 
 			local HeaderBtn = Create("TextButton", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(1,0,0,38),
 				Text = "", AutoButtonColor = false,
 			})
-			Create("Frame", {
+			local AccentBar = Create("Frame", {
 				Parent = HeaderBtn, BackgroundColor3 = theme.Accent, Size = UDim2.new(0,3,0,16), Position = UDim2.new(0,14,0.5,-8),
 			}, {Create("UICorner", {CornerRadius = UDim.new(1,0)})})
-			Create("TextLabel", {
+			Library:RegisterThemeObject(AccentBar, "BackgroundColor3", "Accent")
+			local HeaderLabel = Create("TextLabel", {
 				Parent = HeaderBtn, BackgroundTransparency = 1, Size = UDim2.new(1,-46,1,0), Position = UDim2.new(0,26,0,0),
 				Font = Enum.Font.GothamBold, Text = opts.Name or "Mega Dropdown", TextColor3 = theme.Text, TextSize = 14,
 				TextXAlignment = Enum.TextXAlignment.Left,
 			})
+			Library:RegisterThemeObject(HeaderLabel, "TextColor3", "Text")
 			local MegaChevron = Create("ImageLabel", {
 				Parent = HeaderBtn, BackgroundTransparency = 1, Size = UDim2.new(0,10,0,10),
 				Position = UDim2.new(1,-24,0.5,-5), Image = "rbxassetid://10709790787", ImageColor3 = theme.SubText,
 			})
+			Library:RegisterThemeObject(MegaChevron, "ImageColor3", "SubText")
 
 			local Inner = Create("Frame", {
 				Parent = Frame, BackgroundTransparency = 1, Size = UDim2.new(1,-28,0,0), Position = UDim2.new(0,14,0,44),
