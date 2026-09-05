@@ -169,11 +169,6 @@ local function MakeDraggableToggle(button, onClick)
 			moved = false
 			dragStart = input.Position
 			startPos = button.Position
-			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-				end
-			end)
 		end
 	end)
 
