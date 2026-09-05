@@ -393,7 +393,7 @@ local function ShowKeySystem(parentGui, settings, onSuccess)
 		Position = UDim2.new(0,10,0,0), Font = Enum.Font.Gotham, PlaceholderText = "Enter key...",
 		Text = "", TextColor3 = theme.Text, PlaceholderColor3 = theme.SubText, TextSize = 14,
 		ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, TextTransparency = 1,
-		PlaceholderTransparency = 1, ZIndex = 1002,
+		ZIndex = 1002,
 	})
 
 	local submit = Create("TextButton", {
@@ -415,7 +415,7 @@ local function ShowKeySystem(parentGui, settings, onSuccess)
 		elseif d:IsA("Frame") and d ~= box then
 			Tween(d, {BackgroundTransparency = 0}, 0.35)
 		elseif d:IsA("TextBox") then
-			Tween(d, {TextTransparency = 0, PlaceholderTransparency = 0}, 0.35)
+			Tween(d, {TextTransparency = 0}, 0.35)
 		end
 	end
 
@@ -1369,7 +1369,7 @@ function Library:CreateWindow(config)
 					Parent = NameBoxHolder, BackgroundTransparency = 1, Size = UDim2.new(1,-20,1,0), Position = UDim2.new(0,10,0,0),
 					Font = Enum.Font.Gotham, PlaceholderText = "Save name...", Text = "",
 					TextColor3 = theme.Text, PlaceholderColor3 = theme.SubText, TextSize = 14,
-					TextXAlignment = Enum.TextXAlignment.Left, TextTransparency = 1, PlaceholderTransparency = 1, ZIndex = 902,
+					TextXAlignment = Enum.TextXAlignment.Left, TextTransparency = 1, ZIndex = 902,
 				})
 
 				Tween(Modal, {BackgroundTransparency = 0}, 0.3)
@@ -1377,7 +1377,7 @@ function Library:CreateWindow(config)
 					if d:IsA("TextLabel") then Tween(d, {TextTransparency = 0}, 0.3) end
 					if d:IsA("Frame") then Tween(d, {BackgroundTransparency = 0}, 0.3) end
 					if d:IsA("UIStroke") then Tween(d, {Transparency = 0}, 0.3) end
-					if d:IsA("TextBox") then Tween(d, {TextTransparency = 0, PlaceholderTransparency = 0}, 0.3) end
+					if d:IsA("TextBox") then Tween(d, {TextTransparency = 0}, 0.3) end
 				end
 				NameBox:CaptureFocus()
 
