@@ -1110,6 +1110,13 @@ function Library:CreateWindow(config)
 			rebuildList()
 			updateLabel()
 
+			function MultiDropdown:Set(set)
+				MultiDropdown.Value = set
+				rebuildList()
+				updateLabel()
+				if opts.Callback then pcall(opts.Callback, MultiDropdown.Value) end
+			end
+
 			SelectedLabel.MouseButton1Click:Connect(function()
 				open = not open
 				if open then
@@ -1189,6 +1196,7 @@ function Library:CreateWindow(config)
 		local TransparencySlider = ConfigTab:CreateSlider({
 			Name = "UI Transparency",
 			Min = 0, Max = 90, Default = 0,
+			Flag = "DarkUI_Transparency",
 			Callback = function(v)
 				if applyTransparency then
 					local alpha = v / 100
@@ -1201,6 +1209,7 @@ function Library:CreateWindow(config)
 		ConfigTab:CreateToggle({
 			Name = "Apply Transparency",
 			Default = false,
+			Flag = "DarkUI_ApplyTransparency",
 			Callback = function(v)
 				applyTransparency = v
 				local alpha = applyTransparency and (TransparencySlider.Value / 100) or 0
@@ -1214,6 +1223,7 @@ function Library:CreateWindow(config)
 			Name = "Theme",
 			Options = ThemeOrder,
 			Default = "Dark Default",
+			Flag = "DarkUI_Theme",
 			Callback = function(v)
 				local newTheme = Themes[v]
 				if newTheme then Library:ApplyTheme(newTheme) end
@@ -1241,15 +1251,23 @@ function Library:CreateWindow(config)
 			Callback = function() end,
 		})
 
-		-- gather current config state from all flags
+		-- Build a JSON-serializable snapshot of every flagged element.
+		-- EnumItems (e.g. Bind keycodes) and MultiDropdown sets are converted
+		-- into plain JSON-friendly shapes since Roblox's JSONEncode can't
+		-- handle Enums or sparse/mixed tables directly.
 		local function gatherFlags()
 			local data = {}
 			for flag, obj in pairs(Library.Flags) do
 				if obj.Value ~= nil then
 					if typeof(obj.Value) == "EnumItem" then
-						data[flag] = {__enum = true, name = obj.Value.Name}
+						data[flag] = {__type = "enum", name = obj.Value.Name}
 					elseif typeof(obj.Value) == "table" then
-						data[flag] = obj.Value
+						-- MultiDropdown stores {[option]=bool}; JSON needs an array of the selected ones
+						local selected = {}
+						for k, v in pairs(obj.Value) do
+							if v then table.insert(selected, k) end
+						end
+						data[flag] = {__type = "multiselect", values = selected}
 					else
 						data[flag] = obj.Value
 					end
@@ -1258,17 +1276,42 @@ function Library:CreateWindow(config)
 			return data
 		end
 
-		local function applyFlags(data)
+		-- Wraps the flags into a versioned JSON document and encodes it.
+		local function buildSaveJSON()
+			local payload = {
+				DarkUI_Version = 1,
+				SavedAt = os.date("%Y-%m-%d %H:%M:%S"),
+				Flags = gatherFlags(),
+			}
+			return HttpService:JSONEncode(payload)
+		end
+
+		-- Decodes a JSON save file and pushes every value back into its element.
+		local function applyFlags(json)
+			local ok, payload = pcall(function()
+				return HttpService:JSONDecode(json)
+			end)
+			if not ok or typeof(payload) ~= "table" then return false end
+
+			-- Support both the new {Flags = {...}} wrapper and a raw flag table
+			local data = payload.Flags or payload
+
 			for flag, val in pairs(data) do
 				local obj = Library.Flags[flag]
 				if obj then
-					if typeof(val) == "table" and val.__enum then
-						if obj.Set then obj:Set(Enum.KeyCode[val.name]) else obj.Value = Enum.KeyCode[val.name] end
+					if typeof(val) == "table" and val.__type == "enum" then
+						local key = Enum.KeyCode[val.name]
+						if obj.Set then obj:Set(key) else obj.Value = key end
+					elseif typeof(val) == "table" and val.__type == "multiselect" then
+						local set = {}
+						for _, name in ipairs(val.values) do set[name] = true end
+						if obj.Set then obj:Set(set) else obj.Value = set end
 					else
 						if obj.Set then obj:Set(val) else obj.Value = val end
 					end
 				end
 			end
+			return true
 		end
 
 		-- SAVE modal (blur + name textbox, enter to confirm)
@@ -1335,14 +1378,15 @@ function Library:CreateWindow(config)
 
 				NameBox.FocusLost:Connect(function(enterPressed)
 					if enterPressed and NameBox.Text ~= "" then
-						local saveName = NameBox.Text
-						local data = gatherFlags()
-						local ok, encoded = pcall(HttpService.JSONEncode, HttpService, data)
-						if ok then
-							safeCall(writefile, CONFIG_SUBFOLDER .. "/" .. saveName .. ".json", encoded)
+						local saveName = NameBox.Text:gsub("[^%w%s%-_]", "")
+						local ok, jsonString = pcall(buildSaveJSON)
+						if ok and jsonString then
+							safeCall(writefile, CONFIG_SUBFOLDER .. "/" .. saveName .. ".json", jsonString)
 							SavesDropdown:Refresh(getSaveNames())
 							SavesDropdown:Set(saveName)
-							Library:Notify({Title = "Configuration Saved", Content = "Saved as \"" .. saveName .. "\"", Duration = 3})
+							Library:Notify({Title = "Configuration Saved", Content = "Saved as \"" .. saveName .. "\" (.json)", Duration = 3})
+						else
+							Library:Notify({Title = "Save Failed", Content = "Could not encode configuration to JSON.", Duration = 3})
 						end
 						closeModal()
 					elseif not enterPressed then
@@ -1361,17 +1405,16 @@ function Library:CreateWindow(config)
 					Library:Notify({Title = "Load Failed", Content = "No configuration selected.", Duration = 3})
 					return
 				end
-				local content = safeCall(readfile, CONFIG_SUBFOLDER .. "/" .. name .. ".json")
-				if not content then
+				local jsonString = safeCall(readfile, CONFIG_SUBFOLDER .. "/" .. name .. ".json")
+				if not jsonString then
 					Library:Notify({Title = "Load Failed", Content = "Could not read save file.", Duration = 3})
 					return
 				end
-				local ok, data = pcall(HttpService.JSONDecode, HttpService, content)
-				if ok then
-					applyFlags(data)
-					Library:Notify({Title = "Configuration Loaded", Content = "Loaded \"" .. name .. "\"", Duration = 3})
+				local success = applyFlags(jsonString)
+				if success then
+					Library:Notify({Title = "Configuration Loaded", Content = "Loaded \"" .. name .. "\" from JSON", Duration = 3})
 				else
-					Library:Notify({Title = "Load Failed", Content = "Corrupted save file.", Duration = 3})
+					Library:Notify({Title = "Load Failed", Content = "Corrupted or invalid JSON save file.", Duration = 3})
 				end
 			end,
 		})
