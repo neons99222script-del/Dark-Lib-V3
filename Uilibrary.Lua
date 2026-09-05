@@ -182,6 +182,17 @@ function Library:RegisterThemeObject(obj, prop, key)
 	table.insert(self.ThemeObjects, {Object = obj, Prop = prop, Key = key})
 end
 
+-- Deletes any saved Key System key so ShowKeySystem stops auto-bypassing.
+-- Call DarkUI:ResetKey() from the command bar/console while testing.
+function Library:ResetKey()
+	local ok = pcall(function()
+		if isfile(KEY_FOLDER .. "/key.txt") then
+			delfile(KEY_FOLDER .. "/key.txt")
+		end
+	end)
+	return ok
+end
+
 function Library:ApplyTheme(theme)
 	self.CurrentTheme = theme
 	for _, entry in ipairs(self.ThemeObjects) do
@@ -319,10 +330,19 @@ local function ShowKeySystem(parentGui, settings, onSuccess)
 	local theme = Library.CurrentTheme
 	local keyFile = KEY_FOLDER .. "/key.txt"
 
+	local function cleanRead()
+		local saved = safeCall(readfile, keyFile)
+		if saved then
+			saved = saved:gsub("^%s+", ""):gsub("%s+$", "") -- trim whitespace/newlines
+		end
+		return saved
+	end
+
 	-- auto load
 	if settings.AutoLoadKey then
-		local saved = safeCall(readfile, keyFile)
+		local saved = cleanRead()
 		if saved and saved == settings.Key then
+			warn("[DarkUI] Key System skipped: a matching saved key was found (AutoLoadKey = true). Call DarkUI:ResetKey() to force it to show again.")
 			onSuccess()
 			return
 		end
