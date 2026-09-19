@@ -19,6 +19,7 @@
 			-- when omitted or left as an empty string):
 			BackgroundImage = "rbxassetid://0",  -- texture for the window's background
 			OpenButtonImage = "rbxassetid://0",  -- texture for the floating open bubble
+			Theme = "Ocean",                     -- starting theme name (see ThemeOrder / the Theme dropdown); omit for "Dark Default"
 		})
 
 		local MainTab = Window:CreateTab("Main")
@@ -29,6 +30,9 @@
 	The window background texture (when set) fades in/out together with the
 	"UI Transparency" slider in the Settings tab added by Window:AddConfig(),
 	just like the rest of the window.
+
+	Changing the theme at runtime (e.g. from your own script, not just the
+	Settings tab) works the same way: DarkUI:SetTheme("Cyberpunk").
 
 	All elements: Button, Dropdown, MultiDropdown, MegaDropdown, Toggle, Bind,
 	Slider, Textbox, Notification, SeparateText, Text, Section, ProgressionBar
@@ -226,7 +230,8 @@ local Library = {}
 Library.__index = Library
 Library.Flags = {}
 Library.CurrentTheme = {}
-for k, v in pairs(Themes["Dark Default"]) do Library.CurrentTheme[k] = v end
+Library.CurrentThemeName = "Dark Default"
+for k, v in pairs(Themes[Library.CurrentThemeName]) do Library.CurrentTheme[k] = v end
 Library.ThemeObjects = {} -- objects registered for live theme updates
 Library.Options = {} -- element registry for search + config
 
@@ -273,6 +278,22 @@ function Library:ApplyTheme(newTheme)
 	for _, refresh in ipairs(self.ThemeRefreshers) do
 		pcall(refresh)
 	end
+end
+
+-- Sets the theme by its name, exactly as it appears in the "Theme" dropdown
+-- (e.g. "Ocean", "Cyberpunk", "Light"...). Returns true on success, false if
+-- the name doesn't match any built-in theme. This is what CreateWindow's
+-- Theme = "..." option and the Settings tab's Theme dropdown both call under
+-- the hood, so Library.CurrentThemeName always reflects what's on screen.
+function Library:SetTheme(name)
+	local themeTable = Themes[name]
+	if not themeTable then
+		warn("[DarkUI] Unknown theme name: \"" .. tostring(name) .. "\". Check the spelling against the Theme dropdown options.")
+		return false
+	end
+	self.CurrentThemeName = name
+	self:ApplyTheme(themeTable)
+	return true
 end
 
 --=============================================================
@@ -582,6 +603,27 @@ function Library:CreateWindow(config)
 	local OpenButtonImageId = config.OpenButtonImage
 	if BackgroundImageId == "" then BackgroundImageId = nil end
 	if OpenButtonImageId == "" then OpenButtonImageId = nil end
+
+	-- Accept a bare numeric id (e.g. "1286772516") as well as a full
+	-- "rbxassetid://..." / "http(s)://..." / "rbxthumb://..." string, so a
+	-- forgotten prefix doesn't silently render as a blank image.
+	local function normalizeAssetId(id)
+		if not id then return nil end
+		if id:match("^%d+$") then
+			return "rbxassetid://" .. id
+		end
+		return id
+	end
+	BackgroundImageId = normalizeAssetId(BackgroundImageId)
+	OpenButtonImageId = normalizeAssetId(OpenButtonImageId)
+
+	-- Optional: set the window's starting theme by name (must match one of
+	-- the "Theme" dropdown's options exactly, e.g. "Ocean", "Cyberpunk").
+	-- Applied before any UI is built, so the window opens already themed
+	-- instead of flashing the default look first.
+	if config.Theme then
+		Library:SetTheme(config.Theme)
+	end
 
 	local ParentGui = GetParentGui()
 
@@ -1771,11 +1813,10 @@ function Library:CreateWindow(config)
 		ConfigTab:CreateDropdown({
 			Name = "Theme",
 			Options = ThemeOrder,
-			Default = "Dark Default",
+			Default = Library.CurrentThemeName,
 			Flag = "DarkUI_Theme",
 			Callback = function(v)
-				local newTheme = Themes[v]
-				if newTheme then Library:ApplyTheme(newTheme) end
+				Library:SetTheme(v)
 			end,
 		})
 
