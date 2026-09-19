@@ -14,13 +14,21 @@
 				Key = "By Dark",
 				AutoSaveKey = true,
 				AutoLoadKey = true,
-			}
+			},
+			-- Optional personalization (both default to the flat theme look
+			-- when omitted or left as an empty string):
+			BackgroundImage = "rbxassetid://0",  -- texture for the window's background
+			OpenButtonImage = "rbxassetid://0",  -- texture for the floating open bubble
 		})
 
 		local MainTab = Window:CreateTab("Main")
 		MainTab:CreateButton({Name = "Click Me", Callback = function() end})
 
 		Window:AddConfig()
+
+	The window background texture (when set) fades in/out together with the
+	"UI Transparency" slider in the Settings tab added by Window:AddConfig(),
+	just like the rest of the window.
 
 	All elements: Button, Dropdown, MultiDropdown, MegaDropdown, Toggle, Bind,
 	Slider, Textbox, Notification, SeparateText, Text, Section, ProgressionBar
@@ -567,6 +575,13 @@ function Library:CreateWindow(config)
 	local WindowTitle = config.Title or "DarkUI"
 	local KeySystemEnabled = config.KeySystem or false
 	local KeySettings = config.KeySettings or {}
+	-- Optional personalization: pass a texture asset id to replace the default
+	-- flat background / floating open-button look. Leave nil/"" for the
+	-- built-in theme-colored default.
+	local BackgroundImageId = config.BackgroundImage
+	local OpenButtonImageId = config.OpenButtonImage
+	if BackgroundImageId == "" then BackgroundImageId = nil end
+	if OpenButtonImageId == "" then OpenButtonImageId = nil end
 
 	local ParentGui = GetParentGui()
 
@@ -628,6 +643,24 @@ function Library:CreateWindow(config)
 			Rotation = 90,
 		}),
 	})
+
+	-- Optional custom background texture. Left with Image = "" (invisible)
+	-- when no BackgroundImage id was supplied, so the default flat theme
+	-- color shows through untouched.
+	local BackgroundTexture = Create("ImageLabel", {
+		Name = "BackgroundTexture",
+		Parent = Main,
+		BackgroundTransparency = 1,
+		Size = UDim2.new(1,0,1,0),
+		Image = BackgroundImageId or "",
+		ImageTransparency = BackgroundImageId and 1 or 1, -- starts hidden, faded in below
+		ScaleType = Enum.ScaleType.Crop,
+		ZIndex = 0,
+	}, {Create("UICorner", {CornerRadius = UDim.new(0,14)})})
+	-- how transparent the texture should be at rest once faded in (kept in
+	-- sync with the Config tab's transparency slider — see AddConfig below)
+	local backgroundTextureAlpha = 0
+
 	Shadow.Parent = ScreenGui
 	-- NOTE: intentionally no Position-sync connection here — the shadow stays
 	-- put and does not follow Main around while the window is being dragged.
@@ -639,6 +672,11 @@ function Library:CreateWindow(config)
 	Shadow.ImageTransparency = 1
 	Tween(Main, {Size = mainSize, BackgroundTransparency = 0}, 0.4, Enum.EasingStyle.Back)
 	Tween(Shadow, {ImageTransparency = 0.55}, 0.5)
+	if BackgroundImageId then
+		task.delay(0.15, function()
+			Tween(BackgroundTexture, {ImageTransparency = backgroundTextureAlpha}, 0.35)
+		end)
+	end
 
 	-- top bar
 	local TopBar = Create("Frame", {
@@ -721,12 +759,23 @@ function Library:CreateWindow(config)
 	})
 	Library:RegisterThemeObject(FloatingToggle, "BackgroundColor3", "Accent")
 	local FloatingIcon = Create("ImageLabel", {
-		Parent = FloatingToggle, BackgroundTransparency = 1, Size = UDim2.new(0,22,0,22),
+		Parent = FloatingToggle,
+		BackgroundTransparency = 1,
+		Size = OpenButtonImageId and UDim2.new(1,-6,1,-6) or UDim2.new(0,22,0,22),
 		AnchorPoint = Vector2.new(0.5,0.5), Position = UDim2.new(0.5,0,0.5,0),
-		Image = "rbxassetid://10734950309", ImageColor3 = Color3.new(1,1,1), ZIndex = 501,
+		Image = OpenButtonImageId or "rbxassetid://10734950309",
+		ImageColor3 = Color3.new(1,1,1),
+		ScaleType = OpenButtonImageId and Enum.ScaleType.Fit or Enum.ScaleType.Stretch,
+		ZIndex = 501,
 	})
-	FloatingToggle.MouseEnter:Connect(function() Tween(FloatingIcon, {Size = UDim2.new(0,25,0,25)}, 0.15) end)
-	FloatingToggle.MouseLeave:Connect(function() Tween(FloatingIcon, {Size = UDim2.new(0,22,0,22)}, 0.15) end)
+	if OpenButtonImageId then
+		Create("UICorner", {Parent = FloatingIcon, CornerRadius = UDim.new(1,0)})
+	end
+	local floatingIconRestSize = FloatingIcon.Size
+	FloatingToggle.MouseEnter:Connect(function()
+		Tween(FloatingIcon, {Size = UDim2.new(floatingIconRestSize.X.Scale, floatingIconRestSize.X.Offset + 3, floatingIconRestSize.Y.Scale, floatingIconRestSize.Y.Offset + 3)}, 0.15)
+	end)
+	FloatingToggle.MouseLeave:Connect(function() Tween(FloatingIcon, {Size = floatingIconRestSize}, 0.15) end)
 
 	local uiVisible = true
 
@@ -1692,8 +1741,12 @@ function Library:CreateWindow(config)
 			Callback = function(v)
 				if applyTransparency then
 					local alpha = v / 100
+					backgroundTextureAlpha = alpha
 					Tween(Main, {BackgroundTransparency = alpha}, 0.15)
 					Tween(TopBar, {BackgroundTransparency = alpha}, 0.15)
+					if BackgroundImageId then
+						Tween(BackgroundTexture, {ImageTransparency = alpha}, 0.15)
+					end
 				end
 			end,
 		})
@@ -1705,8 +1758,12 @@ function Library:CreateWindow(config)
 			Callback = function(v)
 				applyTransparency = v
 				local alpha = applyTransparency and (TransparencySlider.Value / 100) or 0
+				backgroundTextureAlpha = alpha
 				Tween(Main, {BackgroundTransparency = alpha}, 0.15)
 				Tween(TopBar, {BackgroundTransparency = alpha}, 0.15)
+				if BackgroundImageId then
+					Tween(BackgroundTexture, {ImageTransparency = alpha}, 0.15)
+				end
 			end,
 		})
 
