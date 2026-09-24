@@ -20,6 +20,7 @@
 			BackgroundImage = "rbxassetid://0",  -- texture for the window's background
 			OpenButtonImage = "rbxassetid://0",  -- texture for the floating open bubble
 			Theme = "Ocean",                     -- starting theme name (see ThemeOrder / the Theme dropdown); omit for "Dark Default"
+			LowGraphics = false,                 -- true removes the drop shadow + decorative gradients (better FPS on low-end/mobile devices)
 		})
 
 		local MainTab = Window:CreateTab("Main")
@@ -403,17 +404,19 @@ local function ShowLoadingScreen(parentGui, libraryName, onComplete)
 	Tween(ring, {ImageTransparency = 0}, 0.4)
 	Tween(label, {TextTransparency = 0}, 0.4)
 
-	-- spin the ring
-	local spinning = true
-	task.spawn(function()
-		while spinning do
-			ring.Rotation = (ring.Rotation + 6) % 360
-			task.wait(0.016)
-		end
+	-- spin the ring (RenderStepped instead of a task.wait polling loop — one
+	-- frame-synced connection that's properly disconnected when it's done,
+	-- rather than a coroutine waking itself up on a timer)
+	local spinConnection
+	spinConnection = RunService.RenderStepped:Connect(function(dt)
+		ring.Rotation = (ring.Rotation + dt * 220) % 360
 	end)
 
 	task.delay(10, function()
-		spinning = false
+		if spinConnection then
+			spinConnection:Disconnect()
+			spinConnection = nil
+		end
 		Tween(overlay, {BackgroundTransparency = 1}, 0.4)
 		Tween(ring, {ImageTransparency = 1}, 0.35)
 		Tween(label, {TextTransparency = 1}, 0.35)
@@ -625,6 +628,13 @@ function Library:CreateWindow(config)
 		Library:SetTheme(config.Theme)
 	end
 
+	-- Optional: trims the heaviest purely-decorative visuals (the drop
+	-- shadow behind the window and its background gradient) for players on
+	-- weaker hardware or mobile devices where GPU fill-rate is limited.
+	-- Everything still works identically — this only removes extra
+	-- semi-transparent layers that add overdraw.
+	local LowGraphics = config.LowGraphics or false
+
 	local ParentGui = GetParentGui()
 
 	local ScreenGui = Create("ScreenGui", {
@@ -648,21 +658,31 @@ function Library:CreateWindow(config)
 
 	local mainSize = IS_MOBILE and UDim2.new(0, 480, 0, 320) or UDim2.new(0, 620, 0, 420)
 
-	-- soft drop shadow behind the window for depth
-	local Shadow = Create("ImageLabel", {
-		Name = "Shadow",
-		Parent = ScreenGui,
-		BackgroundTransparency = 1,
-		Image = "rbxassetid://6014261993",
-		ImageColor3 = Color3.new(0,0,0),
-		ImageTransparency = 0.55,
-		ScaleType = Enum.ScaleType.Slice,
-		SliceCenter = Rect.new(49,49,450,450),
-		AnchorPoint = Vector2.new(0.5,0.5),
-		Position = UDim2.new(0.5,0,0.5,0),
-		Size = UDim2.new(1,60,1,60),
-		ZIndex = 0,
-	})
+	-- soft drop shadow behind the window for depth (skipped in LowGraphics —
+	-- it's a large semi-transparent image and the single biggest source of
+	-- overdraw in the whole UI)
+	local Shadow
+	if not LowGraphics then
+		Shadow = Create("ImageLabel", {
+			Name = "Shadow",
+			Parent = ScreenGui,
+			BackgroundTransparency = 1,
+			Image = "rbxassetid://6014261993",
+			ImageColor3 = Color3.new(0,0,0),
+			ImageTransparency = 0.55,
+			ScaleType = Enum.ScaleType.Slice,
+			SliceCenter = Rect.new(49,49,450,450),
+			AnchorPoint = Vector2.new(0.5,0.5),
+			Position = UDim2.new(0.5,0,0.5,0),
+			Size = UDim2.new(1,60,1,60),
+			ZIndex = 0,
+		})
+	else
+		-- a no-op stand-in so every later Tween(Shadow, ...) call below stays
+		-- valid without branching all over the function (must stay an
+		-- ImageLabel since those tweens target ImageTransparency)
+		Shadow = Create("ImageLabel", {Name = "Shadow", Parent = nil, Image = "", Size = UDim2.new(0,0,0,0)})
+	end
 
 	local Main = Create("Frame", {
 		Name = "Main",
@@ -676,15 +696,18 @@ function Library:CreateWindow(config)
 	}, {
 		Create("UICorner", {CornerRadius = UDim.new(0, 14)}),
 		Create("UIStroke", {Color = theme.Stroke, Thickness = 1, Transparency = 0.2}),
+	})
+	if not LowGraphics then
 		Create("UIGradient", {
+			Parent = Main,
 			Name = "MainShade",
 			Color = ColorSequence.new({
 				ColorSequenceKeypoint.new(0, Color3.new(1,1,1)),
 				ColorSequenceKeypoint.new(1, Color3.new(0.9,0.9,0.9)),
 			}),
 			Rotation = 90,
-		}),
-	})
+		})
+	end
 
 	-- Optional custom background texture. Left with Image = "" (invisible)
 	-- when no BackgroundImage id was supplied, so the default flat theme
@@ -703,7 +726,9 @@ function Library:CreateWindow(config)
 	-- sync with the Config tab's transparency slider — see AddConfig below)
 	local backgroundTextureAlpha = 0
 
-	Shadow.Parent = ScreenGui
+	if not LowGraphics then
+		Shadow.Parent = ScreenGui
+	end
 	-- NOTE: intentionally no Position-sync connection here — the shadow stays
 	-- put and does not follow Main around while the window is being dragged.
 	Library:RegisterThemeObject(Main, "BackgroundColor3", "Main")
@@ -725,14 +750,17 @@ function Library:CreateWindow(config)
 		Parent = Main, BackgroundColor3 = theme.Second, Size = UDim2.new(1,0,0,42),
 	}, {
 		Create("UICorner", {CornerRadius = UDim.new(0,14)}),
+	})
+	if not LowGraphics then
 		Create("UIGradient", {
+			Parent = TopBar,
 			Color = ColorSequence.new({
 				ColorSequenceKeypoint.new(0, Color3.new(1,1,1)),
 				ColorSequenceKeypoint.new(1, Color3.new(0.88,0.88,0.88)),
 			}),
 			Rotation = 90,
-		}),
-	})
+		})
+	end
 	Library:RegisterThemeObject(TopBar, "BackgroundColor3", "Second")
 
 	-- corner patch so bottom corners of topbar stay square
@@ -1267,22 +1295,35 @@ function Library:CreateWindow(config)
 				if opts.Callback then pcall(opts.Callback, v) end
 			end
 
+			-- Only listen to global mouse/touch movement WHILE this specific
+			-- slider is actively being dragged, and disconnect immediately on
+			-- release. A slider that stayed subscribed to InputChanged for its
+			-- whole lifetime — even when idle — meant every extra slider on
+			-- screen added one more listener firing on every mouse-move
+			-- anywhere in the game, which is what was dragging frame rate down.
+			local moveConnection = nil
+
 			Track.InputBegan:Connect(function(input)
 				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 					dragging = true
 					Tween(Handle, {Size = UDim2.new(0,18,0,18)}, 0.1)
 					setFromX(input.Position.X)
-				end
-			end)
-			UserInputService.InputChanged:Connect(function(input)
-				if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-					setFromX(input.Position.X)
+					if moveConnection then moveConnection:Disconnect() end
+					moveConnection = UserInputService.InputChanged:Connect(function(moveInput)
+						if dragging and (moveInput.UserInputType == Enum.UserInputType.MouseMovement or moveInput.UserInputType == Enum.UserInputType.Touch) then
+							setFromX(moveInput.Position.X)
+						end
+					end)
 				end
 			end)
 			UserInputService.InputEnded:Connect(function(input)
 				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 					if dragging then Tween(Handle, {Size = UDim2.new(0,14,0,14)}, 0.1) end
 					dragging = false
+					if moveConnection then
+						moveConnection:Disconnect()
+						moveConnection = nil
+					end
 				end
 			end)
 
